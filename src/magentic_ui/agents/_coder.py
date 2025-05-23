@@ -32,6 +32,7 @@ from autogen_agentchat.messages import (
     TextMessage,
     MessageFactory,
 )
+from autogen_core.code_executor import CodeResult
 from autogen_ext.code_executors.local import LocalCommandLineCodeExecutor
 from autogen_ext.code_executors.docker import DockerCommandLineCodeExecutor
 
@@ -190,12 +191,22 @@ async def _coding_and_debug(
         try:
             for cb in code_block_list:
                 # execute the code block
-                result = await code_executor.execute_code_blocks(
-                    [cb], cancellation_token
-                )
-                exit_code = result.exit_code or 0
-                code_output = result.output
-                if code_output.strip() == "":
+                exit_code: int = 1
+                encountered_exception: bool = False
+                code_output: str = ""
+                result: CodeResult | None = None
+                try:
+                    result = await code_executor.execute_code_blocks(
+                        [cb], cancellation_token
+                    )
+                    exit_code = result.exit_code or 0
+                    code_output = result.output
+                except Exception as e:
+                    code_output = str(e)
+                    encountered_exception = True
+                if encountered_exception or result is None:
+                    code_output = f"An exception occurred while executing the code block: {code_output}"
+                elif code_output.strip() == "":
                     # No output
                     code_output = f"The script ran but produced no output to console. The POSIX exit code was: {result.exit_code}. If you were expecting output, consider revising the script to ensure content is printed to stdout."
                 elif exit_code != 0:
@@ -255,7 +266,7 @@ async def _summarize_coding(
         + [
             UserMessage(
                 content="""
-                The above is a transcript of your previous messages and a request that was given to you in the beggining.
+                The above is a transcript of your previous messages and a request that was given to you in the begining.
                 You need to summarize them to answer the request given to you. Generate a summary of everything that happened.
                 If there was code that was executed, please copy the final code that was executed without errors.
                 Don't mention that this is a summary, just give the summary.""",
@@ -320,7 +331,7 @@ class CoderAgent(BaseChatAgent, Component[CoderAgentConfig]):
     It can access files if given the path and manipulate them using python code. Use the coder if you want to manipulate a file or read a csv or excel files.
     In a single step when you ask the agent to do something: it can write code, and then immediately execute the code. If there are errors it can debug the code and try again. 
     """
-    date_today = datetime.now().strftime("%Y-%m-%d")
+
     system_prompt_coder_template = """
     You are helpful assistant.
     In addition to responding with text you can write code and execute code that you generate.
@@ -342,8 +353,6 @@ class CoderAgent(BaseChatAgent, Component[CoderAgentConfig]):
 
    VERY IMPORTANT: If you intend to write code to be executed, do not end your response without a code block. If you want to write code you must provide a code block in the current generation.
     """
-
-    SYSTEM_PROMPT_CODER = system_prompt_coder_template.format(date_today=date_today)
 
     def __init__(
         self,
@@ -488,11 +497,15 @@ class CoderAgent(BaseChatAgent, Component[CoderAgentConfig]):
 
         monitor_pause_task = asyncio.create_task(monitor_pause())
 
+        system_prompt_coder = self.system_prompt_coder_template.format(
+            date_today=datetime.now().strftime("%Y-%m-%d")
+        )
+
         try:
             executed_code = False
             # Run the code execution and debugging process.
             async for msg in _coding_and_debug(
-                system_prompt=self.SYSTEM_PROMPT_CODER,
+                system_prompt=system_prompt_coder,
                 thread=self._chat_history,
                 agent_name=self.name,
                 model_client=self._model_client,
